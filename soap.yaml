@@ -1,0 +1,27 @@
+# Example soap configuration
+# Commands use Go templates with available variables: {{.ID}}, {{.Title}}, {{.Worktree}}, {{.Index}}
+
+# Create a new worktree for a ticket
+# Should output the path to the new worktree
+createWorktree: |
+  (git worktree add -b ticket/{{.ID}} .worktrees/{{.ID}} || git worktree add .worktrees/{{.ID}} ticket/{{.ID}}) 1>&2 && echo .worktrees/{{.ID}}
+
+# Duplicate the current worktree (for working on same ticket in parallel)
+# Should output the path to the duplicated worktree
+duplicateWorktree: |
+  cli worktree duplicate {{.ID}}-{{.Index}} && echo .worktrees/{{.ID}}-{{.Index}}
+
+# Optional setup commands to run after creating a worktree
+setup: |
+  echo "Working on ticket {{.ID}}: {{.Title}}" > README.ticket.md
+
+# Optional: URL template for opening tickets in browser
+openTicket: 'https://dev.azure.com/org/project/_workitems/edit/{{.ID}}'
+
+# Optional: Command for copying ticket links to clipboard
+copyTicket: |
+  echo "https://dev.azure.com/org/project/_workitems/edit/{{.ID}}" | pbcopy
+
+# Optional: Command to list external tickets for import (must output JSON array)
+# listTickets: |
+#   cli ticket list --json
