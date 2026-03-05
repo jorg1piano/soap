@@ -29,6 +29,13 @@ func main() {
 
 	cmd := os.Args[1]
 
+	// Commands that don't need NATS connection
+	if cmd == "install-hooks" {
+		global := len(os.Args) > 2 && os.Args[2] == "--global"
+		installHooks(global)
+		return
+	}
+
 	// Server mode - starts embedded NATS server and keeps it running
 	if cmd == "server" {
 		fmt.Println("Starting soap server...")

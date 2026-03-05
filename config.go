@@ -17,9 +17,26 @@ type Config struct {
 	Setup             string `yaml:"setup"`             // Commands to run after worktree creation
 
 	// Ticket integration
-	OpenTicket  string `yaml:"openTicket"`  // URL template for opening tickets
-	CopyTicket  string `yaml:"copyTicket"`  // Command for copying ticket links
-	ListTickets string `yaml:"listTickets"` // Command to list external tickets (JSON output)
+	OpenTicket   string `yaml:"openTicket"`   // URL template for opening tickets
+	CopyTicket   string `yaml:"copyTicket"`   // Command for copying ticket links
+	ListTickets  string `yaml:"listTickets"`  // Command to list external tickets (JSON output)
+	CreateTicket string `yaml:"createTicket"` // Command to create ticket in external system
+}
+
+// ExternalTicket represents a ticket from an external system
+type ExternalTicket struct {
+	Kind  string      `json:"kind,omitempty"`  // Optional kind field
+	ID    interface{} `json:"id"`              // Can be string or int
+	Title string      `json:"title"`
+	State string      `json:"state,omitempty"` // Optional state
+	Type  string      `json:"type,omitempty"`  // Optional type
+	URL   string      `json:"url,omitempty"`   // Optional URL
+}
+
+// CreateTicketData holds data for rendering createTicket template
+type CreateTicketData struct {
+	Type  string // Ticket type (story, bug, feature, etc.)
+	Title string // Ticket title
 }
 
 // TemplateData holds data for template rendering
@@ -46,6 +63,19 @@ func LoadConfig(path string) (*Config, error) {
 // RenderTemplate renders a Go template string with the given data
 func RenderTemplate(tmpl string, data TemplateData) (string, error) {
 	t, err := template.New("tmpl").Parse(tmpl)
+	if err != nil {
+		return "", fmt.Errorf("parse template: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := t.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("execute template: %w", err)
+	}
+	return buf.String(), nil
+}
+
+// RenderCreateTicketTemplate renders a createTicket template with the given data
+func RenderCreateTicketTemplate(tmpl string, data CreateTicketData) (string, error) {
+	t, err := template.New("createTicket").Parse(tmpl)
 	if err != nil {
 		return "", fmt.Errorf("parse template: %w", err)
 	}

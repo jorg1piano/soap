@@ -150,3 +150,8 @@ func (s *Store) AllTickets() ([]Ticket, error) {
 func (s *Store) DeleteTicket(id string) error {
 	return s.kv.Delete(context.Background(), id)
 }
+
+// Publish publishes a message to a NATS subject
+func (s *Store) Publish(subject string, data []byte) error {
+	return s.nc.Publish(subject, data)
+}

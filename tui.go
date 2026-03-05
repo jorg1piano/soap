@@ -60,15 +60,6 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	return nil
 }
 
-type ExternalTicket struct {
-	Kind  string `json:"kind"`
-	ID    int    `json:"id"`
-	Title string `json:"title"`
-	State string `json:"state"`
-	Type  string `json:"type"`
-	URL   string `json:"url"`
-}
-
 type model struct {
 	store  *Store
 	tmux   *TmuxManager
@@ -276,8 +267,31 @@ func (m model) handleCreateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			ticketType := ticketTypes[m.createTypeSelect]
 
+			// Use createTicket command if configured, otherwise generate random ID
+			ticketID := generateTicketID()
+			if m.cfg.CreateTicket != "" {
+				cmdStr, err := RenderCreateTicketTemplate(m.cfg.CreateTicket, CreateTicketData{
+					Type:  ticketType,
+					Title: title,
+				})
+				if err != nil {
+					m.status = fmt.Sprintf("Template error: %v", err)
+					return m, nil
+				}
+				cmd := exec.Command("bash", "-c", strings.TrimSpace(cmdStr))
+				out, err := cmd.Output()
+				if err != nil {
+					m.status = fmt.Sprintf("createTicket failed: %v", err)
+					return m, nil
+				}
+				externalID := strings.TrimSpace(string(out))
+				if externalID != "" {
+					ticketID = externalID
+				}
+			}
+
 			ticket := Ticket{
-				ID:    generateTicketID(),
+				ID:    ticketID,
 				Title: fmt.Sprintf("[%s] %s", ticketType, title),
 			}
 			if err := m.store.PutTicket(ticket); err != nil {

@@ -23,5 +23,12 @@ copyTicket: |
   echo "https://dev.azure.com/org/project/_workitems/edit/{{.ID}}" | pbcopy
 
 # Optional: Command to list external tickets for import (must output JSON array)
+# Example: Query your issue tracker and output tickets in JSON format
 # listTickets: |
-#   cli ticket list --json
+#   gh issue list --json number,title --jq '[.[] | {id: .number, title: .title}]'
+
+# Optional: Command to create a new ticket in external system
+# Should output the ticket ID of the created ticket
+# Template variables: {{.Type}} (story/bug/feature/chore/task), {{.Title}}
+# createTicket: |
+#   gh issue create --title "[{{.Type}}] {{.Title}}" --body "" --json number --jq '.number'

@@ -7,9 +7,11 @@ import (
 
 // Ticket represents a work item
 type Ticket struct {
-	ID       string `json:"id"`
-	Title    string `json:"title"`
-	Worktree string `json:"worktree,omitempty"`
+	ID             string `json:"id"`
+	Title          string `json:"title"`
+	Worktree       string `json:"worktree,omitempty"`
+	NeedsAttention bool   `json:"needsAttention,omitempty"`
+	LastPingTime   int64  `json:"lastPingTime,omitempty"`
 }
 
 // Configuration constants
