@@ -2,15 +2,16 @@ package main
 
 import (
 	_ "embed"
-	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -24,14 +25,12 @@ type keyMap struct {
 	Up         key.Binding
 	Down       key.Binding
 	Select     key.Binding
-	New        key.Binding
 	Delete     key.Binding
 	Editor     key.Binding
 	Shell      key.Binding
 	FreeClaude key.Binding
 	OpenTicket key.Binding
 	CopyTicket key.Binding
-	Import     key.Binding
 	Quit       key.Binding
 }
 
@@ -40,20 +39,18 @@ func newKeyMap() keyMap {
 		Up:         key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 		Down:       key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
 		Select:     key.NewBinding(key.WithKeys("enter", "c"), key.WithHelp("enter/c", "select")),
-		New:        key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "new")),
 		Delete:     key.NewBinding(key.WithKeys("d", "backspace"), key.WithHelp("d", "delete")),
 		Editor:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "vscode")),
-		Shell:      key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "shell")),
+		Shell:      key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "switch pane")),
 		FreeClaude: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "free claude")),
 		OpenTicket: key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open ticket")),
 		CopyTicket: key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy link")),
-		Import:     key.NewBinding(key.WithKeys("i"), key.WithHelp("i", "import")),
 		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Select, k.New, k.Import, k.Editor, k.Shell, k.FreeClaude, k.OpenTicket, k.CopyTicket, k.Delete, k.Quit}
+	return []key.Binding{k.Select, k.Editor, k.Shell, k.FreeClaude, k.OpenTicket, k.CopyTicket, k.Delete, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
@@ -61,32 +58,34 @@ func (k keyMap) FullHelp() [][]key.Binding {
 }
 
 type model struct {
-	store  *Store
-	tmux   *TmuxManager
-	cfg    *Config
-	tickets []Ticket
-	cursor  int
-	keys    keyMap
-	help    help.Model
-	status  string
-	err     error
-	// Create mode
-	createMode       bool
-	createTypeSelect int // 0=story, 1=bug, 2=feature, 3=chore, 4=task
-	createTitleInput textinput.Model
-	createStep       int // 0=select type, 1=enter title
-	// Import mode
-	importMode   bool
-	importList   []ExternalTicket
-	importSelect int
+	store           *Store
+	tmux            *TmuxManager
+	cfg             *Config
+	tickets         []ExternalTicket
+	cursor          int
+	keys            keyMap
+	help            help.Model
+	status          string
+	err             error
+	terminals       map[string]Terminal // pane_id -> terminal info
+	terminalPaneIDs []string            // sorted list of pane IDs for selection
+	terminalCursor  int                 // cursor position in terminals list
+	ticketInfo      map[string]string   // pane_id -> loadTicket output
+	animFrame       int                 // animation frame counter for spinners
 }
 
 type tickMsg struct{}
+type animTickMsg struct{}
 type statusMsg struct{ msg string }
 type listTicketsMsg struct {
 	tickets []ExternalTicket
 	err     error
 }
+type ticketInfoMsg struct {
+	info map[string]string
+}
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
@@ -94,44 +93,99 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-func initialModel(store *Store, tmux *TmuxManager, cfg *Config) model {
-	createInput := textinput.New()
-	createInput.Placeholder = "Ticket title..."
-	createInput.CharLimit = 100
-	createInput.Width = 60
-	createInput.Blur()
+func animTickCmd() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+		return animTickMsg{}
+	})
+}
 
+func initialModel(store *Store, tmux *TmuxManager, cfg *Config) model {
 	h := help.New()
 	h.Styles.ShortKey = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Bold(true)
 	h.Styles.ShortDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	h.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
 	m := model{
-		store:            store,
-		tmux:             tmux,
-		cfg:              cfg,
-		createTitleInput: createInput,
-		keys:             newKeyMap(),
-		help:             h,
-		status:           "Ready",
+		store:      store,
+		tmux:       tmux,
+		cfg:        cfg,
+		keys:       newKeyMap(),
+		help:       h,
+		status:     "Loading tickets...",
+		terminals:  make(map[string]Terminal),
+		ticketInfo: make(map[string]string),
 	}
-	m.reload()
 	return m
 }
 
-func (m *model) reload() {
-	tickets, err := m.store.AllTickets()
-	if err != nil {
-		m.err = err
-		return
-	}
-	m.tickets = tickets
-	if m.cursor >= len(m.tickets) {
-		m.cursor = max(0, len(m.tickets)-1)
+func (m *model) fetchTicketsCmd() tea.Cmd {
+	cfg := m.cfg
+	return func() tea.Msg {
+		tickets, err := fetchTickets(cfg)
+		return listTicketsMsg{tickets: tickets, err: err}
 	}
 }
 
-func (m *model) selectedTicket() *Ticket {
+func (m *model) updateTerminalList() {
+	var selectedPaneID string
+	if m.terminalCursor < len(m.terminalPaneIDs) {
+		selectedPaneID = m.terminalPaneIDs[m.terminalCursor]
+	}
+
+	m.terminalPaneIDs = make([]string, 0, len(m.terminals))
+	for paneID := range m.terminals {
+		m.terminalPaneIDs = append(m.terminalPaneIDs, paneID)
+	}
+	sort.Strings(m.terminalPaneIDs)
+
+	if selectedPaneID != "" {
+		for i, id := range m.terminalPaneIDs {
+			if id == selectedPaneID {
+				m.terminalCursor = i
+				return
+			}
+		}
+	}
+	if m.terminalCursor >= len(m.terminalPaneIDs) {
+		m.terminalCursor = max(0, len(m.terminalPaneIDs)-1)
+	}
+}
+
+func (m *model) refreshTicketInfoCmd() tea.Cmd {
+	loadCmd := m.cfg.LoadTicket
+	if loadCmd == "" {
+		return nil
+	}
+
+	terminals := make(map[string]Terminal, len(m.terminals))
+	for k, v := range m.terminals {
+		terminals[k] = v
+	}
+
+	return func() tea.Msg {
+		info := make(map[string]string)
+		for paneID, term := range terminals {
+			dir := filepath.Base(term.CurrentPath)
+			ticketID := extractTicketIDFromDir(dir)
+			if ticketID == "" {
+				continue
+			}
+			rendered, err := RenderTemplate(loadCmd, TemplateData{ID: ticketID})
+			if err != nil {
+				continue
+			}
+			cmd := exec.Command("sh", "-c", strings.TrimSpace(rendered))
+			out, err := cmd.Output()
+			if err != nil {
+				continue
+			}
+			info[paneID] = strings.TrimSpace(string(out))
+		}
+		return ticketInfoMsg{info: info}
+	}
+}
+
+func (m *model) selectedTicket() *ExternalTicket {
 	if m.cursor < len(m.tickets) {
 		return &m.tickets[m.cursor]
 	}
@@ -139,60 +193,105 @@ func (m *model) selectedTicket() *Ticket {
 }
 
 func (m model) Init() tea.Cmd {
-	return tickCmd()
+	return tea.Batch(tickCmd(), animTickCmd(), m.fetchTicketsCmd())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case statusMsg:
 		m.status = msg.msg
-		m.reload()
 		return m, nil
 
 	case listTicketsMsg:
 		if msg.err != nil {
-			m.status = fmt.Sprintf("Import failed: %v", msg.err)
+			m.status = fmt.Sprintf("Error: %v", msg.err)
 			return m, nil
 		}
-		if len(msg.tickets) == 0 {
-			m.status = "No tickets found"
-			return m, nil
+		// Preserve cursor position
+		var selectedID string
+		if m.cursor < len(m.tickets) {
+			selectedID = m.tickets[m.cursor].TicketID()
 		}
-		m.importMode = true
-		m.importList = msg.tickets
-		m.importSelect = 0
-		m.status = "Select ticket to import (↑/↓ navigate, Enter select, Esc cancel)"
+		m.tickets = msg.tickets
+		if selectedID != "" {
+			for i, t := range m.tickets {
+				if t.TicketID() == selectedID {
+					m.cursor = i
+					break
+				}
+			}
+		}
+		if m.cursor >= len(m.tickets) && m.cursor >= 1 {
+			m.cursor = max(0, len(m.tickets)-1)
+		}
+		if m.status == "Loading tickets..." {
+			m.status = "Ready"
+		}
+		return m, nil
+
+	case animTickMsg:
+		m.animFrame = (m.animFrame + 1) % len(spinnerFrames)
+		return m, animTickCmd()
+
+	case ticketInfoMsg:
+		m.ticketInfo = msg.info
 		return m, nil
 
 	case tickMsg:
-		if !m.createMode && !m.importMode {
-			m.reload()
+		// Scan tmux panes to refresh terminal state
+		panes := m.tmux.ListPanes()
+		m.terminals = make(map[string]Terminal)
+		for _, p := range panes {
+			p.Keys = loadPaneKeys(p.PaneID)
+			m.terminals[p.PaneID] = p
 		}
-		return m, tickCmd()
+		m.updateTerminalList()
+		return m, tea.Batch(tickCmd(), m.fetchTicketsCmd(), m.refreshTicketInfoCmd())
 
 	case tea.KeyMsg:
-		if m.createMode {
-			return m.handleCreateInput(msg)
-		}
-		if m.importMode {
-			return m.handleImportInput(msg)
-		}
-
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
 		case key.Matches(msg, m.keys.Up):
-			if m.cursor > 0 {
-				m.cursor--
+			totalItems := len(m.tickets) + len(m.terminalPaneIDs)
+			if totalItems == 0 {
+				break
+			}
+			currentPos := m.cursor
+			if m.cursor >= len(m.tickets) {
+				currentPos = len(m.tickets) + m.terminalCursor
+			}
+			if currentPos > 0 {
+				currentPos--
+				if currentPos < len(m.tickets) {
+					m.cursor = currentPos
+					m.terminalCursor = 0
+				} else {
+					m.cursor = len(m.tickets)
+					m.terminalCursor = currentPos - len(m.tickets)
+				}
 			}
 		case key.Matches(msg, m.keys.Down):
-			if m.cursor < len(m.tickets)-1 {
-				m.cursor++
+			totalItems := len(m.tickets) + len(m.terminalPaneIDs)
+			if totalItems == 0 {
+				break
+			}
+			currentPos := m.cursor
+			if m.cursor >= len(m.tickets) {
+				currentPos = len(m.tickets) + m.terminalCursor
+			}
+			if currentPos < totalItems-1 {
+				currentPos++
+				if currentPos < len(m.tickets) {
+					m.cursor = currentPos
+					m.terminalCursor = 0
+				} else {
+					m.cursor = len(m.tickets)
+					m.terminalCursor = currentPos - len(m.tickets)
+				}
 			}
 		case key.Matches(msg, m.keys.Select):
 			return m.handleSelect()
-		case key.Matches(msg, m.keys.New):
-			return m.handleNew()
 		case key.Matches(msg, m.keys.Delete):
 			return m.handleDelete()
 		case key.Matches(msg, m.keys.Editor):
@@ -205,185 +304,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleOpenTicket()
 		case key.Matches(msg, m.keys.CopyTicket):
 			return m.handleCopyTicket()
-		case key.Matches(msg, m.keys.Import):
-			return m.handleImport()
 		}
 	}
 
-	if m.createMode && m.createStep == 1 {
-		var cmd tea.Cmd
-		m.createTitleInput, cmd = m.createTitleInput.Update(msg)
-		return m, cmd
-	}
-
-	return m, nil
-}
-
-func (m model) handleNew() (tea.Model, tea.Cmd) {
-	m.createMode = true
-	m.createStep = 0
-	m.createTypeSelect = 0
-	m.status = "Select ticket type (↑/↓ to navigate, Enter to select, Esc to cancel)"
-	return m, nil
-}
-
-func (m model) handleCreateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	ticketTypes := []string{"story", "bug", "feature", "chore", "task"}
-
-	if m.createStep == 0 {
-		// Step 0: Select ticket type
-		switch msg.Type {
-		case tea.KeyUp, tea.KeyCtrlK:
-			if m.createTypeSelect > 0 {
-				m.createTypeSelect--
-			}
-			return m, nil
-		case tea.KeyDown, tea.KeyCtrlJ:
-			if m.createTypeSelect < len(ticketTypes)-1 {
-				m.createTypeSelect++
-			}
-			return m, nil
-		case tea.KeyEnter:
-			m.createStep = 1
-			m.createTitleInput.SetValue("")
-			m.createTitleInput.Focus()
-			m.status = fmt.Sprintf("Creating %s ticket — enter title and press Enter (Esc to cancel)", ticketTypes[m.createTypeSelect])
-			return m, m.createTitleInput.Cursor.BlinkCmd()
-		case tea.KeyEsc:
-			m.createMode = false
-			m.createStep = 0
-			m.createTypeSelect = 0
-			m.status = "Ticket creation cancelled"
-			return m, nil
-		}
-	} else {
-		// Step 1: Enter title
-		switch msg.Type {
-		case tea.KeyEnter:
-			title := m.createTitleInput.Value()
-			if title == "" {
-				m.status = "Title cannot be empty"
-				return m, nil
-			}
-			ticketType := ticketTypes[m.createTypeSelect]
-
-			// Use createTicket command if configured, otherwise generate random ID
-			ticketID := generateTicketID()
-			if m.cfg.CreateTicket != "" {
-				cmdStr, err := RenderCreateTicketTemplate(m.cfg.CreateTicket, CreateTicketData{
-					Type:  ticketType,
-					Title: title,
-				})
-				if err != nil {
-					m.status = fmt.Sprintf("Template error: %v", err)
-					return m, nil
-				}
-				cmd := exec.Command("bash", "-c", strings.TrimSpace(cmdStr))
-				out, err := cmd.Output()
-				if err != nil {
-					m.status = fmt.Sprintf("createTicket failed: %v", err)
-					return m, nil
-				}
-				externalID := strings.TrimSpace(string(out))
-				if externalID != "" {
-					ticketID = externalID
-				}
-			}
-
-			ticket := Ticket{
-				ID:    ticketID,
-				Title: fmt.Sprintf("[%s] %s", ticketType, title),
-			}
-			if err := m.store.PutTicket(ticket); err != nil {
-				m.err = err
-			}
-			m.reload()
-			m.createMode = false
-			m.createStep = 0
-			m.createTypeSelect = 0
-			m.createTitleInput.SetValue("")
-			m.status = fmt.Sprintf("Created %s: [%s] %s", ticket.ID, ticketType, title)
-			return m, nil
-
-		case tea.KeyEsc:
-			m.createMode = false
-			m.createStep = 0
-			m.createTypeSelect = 0
-			m.createTitleInput.SetValue("")
-			m.status = "Ticket creation cancelled"
-			return m, nil
-
-		default:
-			var cmd tea.Cmd
-			m.createTitleInput, cmd = m.createTitleInput.Update(msg)
-			return m, cmd
-		}
-	}
-	return m, nil
-}
-
-func (m model) handleImport() (tea.Model, tea.Cmd) {
-	if m.cfg.ListTickets == "" {
-		m.status = "No listTickets configured in soap.yaml"
-		return m, nil
-	}
-
-	m.status = "Fetching tickets..."
-	cmdStr := m.cfg.ListTickets
-
-	return m, func() tea.Msg {
-		cmd := exec.Command("bash", "-c", strings.TrimSpace(cmdStr))
-		out, err := cmd.Output()
-		if err != nil {
-			return listTicketsMsg{err: err}
-		}
-		var tickets []ExternalTicket
-		if err := json.Unmarshal(out, &tickets); err != nil {
-			return listTicketsMsg{err: fmt.Errorf("parse JSON: %w", err)}
-		}
-		// Filter to ticket kind
-		var filtered []ExternalTicket
-		for _, t := range tickets {
-			if t.Kind == "" || t.Kind == "ticket" {
-				filtered = append(filtered, t)
-			}
-		}
-		return listTicketsMsg{tickets: filtered}
-	}
-}
-
-func (m model) handleImportInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.Type {
-	case tea.KeyUp, tea.KeyCtrlK:
-		if m.importSelect > 0 {
-			m.importSelect--
-		}
-		return m, nil
-	case tea.KeyDown, tea.KeyCtrlJ:
-		if m.importSelect < len(m.importList)-1 {
-			m.importSelect++
-		}
-		return m, nil
-	case tea.KeyEnter:
-		ext := m.importList[m.importSelect]
-		ticket := Ticket{
-			ID:    fmt.Sprintf("%d", ext.ID),
-			Title: ext.Title,
-		}
-		if err := m.store.PutTicket(ticket); err != nil {
-			m.err = err
-		}
-		m.reload()
-		m.importMode = false
-		m.importList = nil
-		m.status = fmt.Sprintf("Imported #%d: %s", ext.ID, ext.Title)
-		return m, nil
-	case tea.KeyEsc:
-		m.importMode = false
-		m.importList = nil
-		m.status = "Import cancelled"
-		return m, nil
-	}
 	return m, nil
 }
 
@@ -394,112 +317,115 @@ func (m model) handleSelect() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.cfg.OnSelect == "" {
+		m.status = "No onSelect configured in soap.yaml"
+		return m, nil
+	}
+
 	ticket := *t
 	cfg := m.cfg
-	store := m.store
-	tmux := m.tmux
 
-	m.status = fmt.Sprintf("Selecting %s...", ticket.ID)
+	m.status = fmt.Sprintf("Selecting %s...", ticket.TicketID())
 
 	return m, func() tea.Msg {
-		var worktreePath string
-
-		if ticket.Worktree != "" {
-			worktreePath = ticket.Worktree
-		} else {
-			if cfg.CreateWorktree == "" {
-				return statusMsg{msg: "Error: createWorktree not configured"}
-			}
-
-			cmdStr, err := RenderTemplate(cfg.CreateWorktree, TemplateData{
-				ID:    ticket.ID,
-				Title: ticket.Title,
-				Index: 0,
-			})
-			if err != nil {
-				return statusMsg{msg: fmt.Sprintf("Error: %v", err)}
-			}
-
-			out, err := runBashCommand(cmdStr)
-			if err != nil {
-				return statusMsg{msg: fmt.Sprintf("Error creating worktree: %v", err)}
-			}
-
-			worktreePath = out
-			ticket.Worktree = worktreePath
-			store.PutTicket(ticket)
-
-			if cfg.Setup != "" {
-				setupCmd, _ := RenderTemplate(cfg.Setup, TemplateData{
-					ID:       ticket.ID,
-					Title:    ticket.Title,
-					Worktree: worktreePath,
-					Index:    0,
-				})
-				runBashCommandInDir(setupCmd, worktreePath)
-			}
-		}
-
-		if err := tmux.OpenClaudeSession(ticket, worktreePath); err != nil {
+		cmdStr, err := RenderTemplate(cfg.OnSelect, TemplateData{
+			ID:    ticket.TicketID(),
+			Title: ticket.Title,
+		})
+		if err != nil {
 			return statusMsg{msg: fmt.Sprintf("Error: %v", err)}
 		}
 
-		return statusMsg{msg: fmt.Sprintf("Opened Claude session for %s", ticket.ID)}
+		cmd := exec.Command("bash", "-c", strings.TrimSpace(cmdStr))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return statusMsg{msg: fmt.Sprintf("onSelect failed: %v (%s)", err, strings.TrimSpace(string(out)))}
+		}
+
+		return statusMsg{msg: fmt.Sprintf("Selected %s", ticket.TicketID())}
 	}
 }
 
 func (m model) handleDelete() (tea.Model, tea.Cmd) {
+	// If cursor is in the terminals section, kill the pane
+	if m.cursor >= len(m.tickets) && len(m.terminalPaneIDs) > 0 {
+		if m.terminalCursor >= len(m.terminalPaneIDs) {
+			return m, nil
+		}
+		paneID := m.terminalPaneIDs[m.terminalCursor]
+		_, err := tmuxRun("kill-pane", "-t", paneID)
+		if err != nil {
+			m.status = fmt.Sprintf("Error killing pane %s: %v", paneID, err)
+		} else {
+			delete(m.terminals, paneID)
+			m.updateTerminalList()
+			m.status = fmt.Sprintf("Killed pane %s", paneID)
+		}
+		return m, nil
+	}
+
 	t := m.selectedTicket()
 	if t == nil {
 		return m, nil
 	}
 
+	if m.cfg.OnDelete == "" {
+		m.status = "No onDelete configured in soap.yaml"
+		return m, nil
+	}
+
 	ticket := *t
-	m.tmux.CleanupTicket(ticket.ID)
+	cfg := m.cfg
 
-	if ticket.Worktree != "" {
-		cleanupWorktree(ticket.Worktree)
+	m.status = fmt.Sprintf("Deleting %s...", ticket.TicketID())
+
+	return m, func() tea.Msg {
+		cmdStr, err := RenderTemplate(cfg.OnDelete, TemplateData{
+			ID:    ticket.TicketID(),
+			Title: ticket.Title,
+		})
+		if err != nil {
+			return statusMsg{msg: fmt.Sprintf("Error: %v", err)}
+		}
+
+		cmd := exec.Command("bash", "-c", strings.TrimSpace(cmdStr))
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return statusMsg{msg: fmt.Sprintf("onDelete failed: %v (%s)", err, strings.TrimSpace(string(out)))}
+		}
+
+		return statusMsg{msg: fmt.Sprintf("Deleted %s", ticket.TicketID())}
 	}
-
-	if err := m.store.DeleteTicket(ticket.ID); err != nil {
-		m.err = err
-	}
-
-	m.reload()
-	m.status = fmt.Sprintf("Deleted %s", ticket.ID)
-	return m, nil
 }
 
 func (m model) handleEditor() (tea.Model, tea.Cmd) {
-	dir := "."
-	if t := m.selectedTicket(); t != nil && t.Worktree != "" {
-		dir = t.Worktree
-	}
-	cmd := exec.Command("open", "-a", "Visual Studio Code", dir)
+	cmd := exec.Command("open", "-a", "Visual Studio Code", ".")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		m.status = fmt.Sprintf("VS Code error: %v (%s)", err, strings.TrimSpace(string(out)))
 	} else {
-		m.status = fmt.Sprintf("Opened VS Code in %s", dir)
+		m.status = "Opened VS Code"
 	}
 	return m, nil
 }
 
 func (m model) handleShell() (tea.Model, tea.Cmd) {
-	m.status = "Opening shell tab..."
-	tmux := m.tmux
+	if len(m.terminalPaneIDs) == 0 {
+		m.status = "No registered terminals"
+		return m, nil
+	}
+
+	if m.terminalCursor >= len(m.terminalPaneIDs) {
+		m.status = "Invalid terminal selection"
+		return m, nil
+	}
+
+	paneID := m.terminalPaneIDs[m.terminalCursor]
+	m.status = fmt.Sprintf("Switching to pane %s...", paneID)
 
 	return m, func() tea.Msg {
-		windowName := "shell"
-		var err error
-		if !tmux.windowExists(windowName) {
-			_, err = tmuxRun("new-window", "-d", "-t", tmux.sessionID+":", "-n", windowName)
-		} else {
-			_, err = tmuxRun("select-window", "-t", tmux.target(windowName))
+		cmd := exec.Command("tmux", "switch-client", "-t", paneID)
+		if err := cmd.Run(); err != nil {
+			return statusMsg{msg: fmt.Sprintf("Error switching pane: %v", err)}
 		}
-		if err != nil {
-			return statusMsg{msg: fmt.Sprintf("Error: %v", err)}
-		}
-		return statusMsg{msg: "Opened shell tab"}
+		return statusMsg{msg: fmt.Sprintf("Switched to %s", paneID)}
 	}
 }
 
@@ -531,7 +457,7 @@ func (m model) handleOpenTicket() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	url, err := RenderTemplate(m.cfg.OpenTicket, TemplateData{
-		ID:    t.ID,
+		ID:    t.TicketID(),
 		Title: t.Title,
 	})
 	if err != nil {
@@ -559,7 +485,7 @@ func (m model) handleCopyTicket() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	rendered, err := RenderTemplate(m.cfg.CopyTicket, TemplateData{
-		ID:    t.ID,
+		ID:    t.TicketID(),
 		Title: t.Title,
 	})
 	if err != nil {
@@ -571,7 +497,7 @@ func (m model) handleCopyTicket() (tea.Model, tea.Cmd) {
 	if err := cmd.Run(); err != nil {
 		m.status = fmt.Sprintf("Copy failed: %v", err)
 	} else {
-		m.status = fmt.Sprintf("Copied link for #%s", t.ID)
+		m.status = fmt.Sprintf("Copied link for #%s", t.TicketID())
 	}
 	return m, nil
 }
@@ -579,20 +505,18 @@ func (m model) handleCopyTicket() (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var s strings.Builder
 
-	// ASCII art on the left
 	artStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Padding(0, 2, 0, 0)
 	artRendered := artStyle.Render(asciiArt)
 
-	// Build right side content
 	var rightSide strings.Builder
 	rightSide.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99")).Render("SOAP - Ticket Manager"))
 	rightSide.WriteString("\n\n")
 
 	// Ticket list
-	if len(m.tickets) == 0 && !m.createMode && !m.importMode {
+	if len(m.tickets) == 0 {
 		rightSide.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Italic(true).Render("  No tickets"))
 		rightSide.WriteString("\n")
-	} else if !m.createMode && !m.importMode {
+	} else {
 		for i, t := range m.tickets {
 			cursor := "  "
 			if i == m.cursor {
@@ -604,10 +528,7 @@ func (m model) View() string {
 				style = style.Foreground(lipgloss.Color("33")).Bold(true)
 			}
 
-			line := fmt.Sprintf("%s%-10s %s", cursor, t.ID, t.Title)
-			if t.Worktree != "" {
-				line += " ✓"
-			}
+			line := fmt.Sprintf("%s%-10s %s", cursor, t.TicketID(), t.Title)
 
 			rightSide.WriteString(style.Render(line))
 			rightSide.WriteString("\n")
@@ -616,69 +537,77 @@ func (m model) View() string {
 
 	rightSide.WriteString("\n")
 
-	// Create mode
-	if m.createMode {
-		ticketTypes := []string{"story", "bug", "feature", "chore", "task"}
-		if m.createStep == 0 {
-			rightSide.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true).Render("  Create ticket — select type:"))
-			rightSide.WriteString("\n")
-			for i, t := range ticketTypes {
-				prefix := "    "
-				if i == m.createTypeSelect {
-					prefix = "  > "
-				}
-				style := lipgloss.NewStyle().Padding(0, 1)
-				if i == m.createTypeSelect {
-					style = style.Foreground(lipgloss.Color("33")).Bold(true)
-				}
-				rightSide.WriteString(style.Render(fmt.Sprintf("%s%s", prefix, t)))
-				rightSide.WriteString("\n")
-			}
-		} else {
-			ticketType := ticketTypes[m.createTypeSelect]
-			rightSide.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true).Render(fmt.Sprintf("  Create %s ticket — title: ", ticketType)))
-			rightSide.WriteString(m.createTitleInput.View())
-			rightSide.WriteString("\n")
-		}
+	// Registered terminals section
+	if len(m.terminals) > 0 {
+		rightSide.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true).Render("Terminals"))
 		rightSide.WriteString("\n")
-	}
 
-	// Import mode
-	if m.importMode && len(m.importList) > 0 {
-		rightSide.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true).Render("  Import ticket:"))
-		rightSide.WriteString("\n")
-		visibleCount := 8
-		start := m.importSelect - visibleCount/2
-		if start < 0 {
-			start = 0
-		}
-		end := start + visibleCount
-		if end > len(m.importList) {
-			end = len(m.importList)
-			start = end - visibleCount
-			if start < 0 {
-				start = 0
+		orangeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8C00"))
+		orangeBoldStyle := orangeStyle.Bold(true)
+		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+		normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+		selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
+
+		for i, paneID := range m.terminalPaneIDs {
+			term := m.terminals[paneID]
+			isSelected := i == m.terminalCursor && m.cursor >= len(m.tickets)
+			hasClaude := term.Keys["claude"]
+			isProcessing := term.Keys["claude-processing"]
+
+			ticketID := "_____"
+			dirName := filepath.Base(term.CurrentPath)
+			if id := extractTicketIDFromDir(dirName); id != "" {
+				ticketID = id
 			}
-		}
-		for i := start; i < end; i++ {
-			t := m.importList[i]
-			prefix := "    "
-			if i == m.importSelect {
-				prefix = "  > "
+
+			indicator := " "
+			if isProcessing {
+				indicator = spinnerFrames[m.animFrame]
+			} else if hasClaude {
+				indicator = "●"
 			}
-			style := lipgloss.NewStyle().Padding(0, 1)
-			if i == m.importSelect {
-				style = style.Foreground(lipgloss.Color("33")).Bold(true)
+
+			cursorStr := "  "
+			if isSelected {
+				cursorStr = "> "
 			}
-			label := fmt.Sprintf("%s#%d %s", prefix, t.ID, t.Title)
-			if len(label) > 80 {
-				label = label[:77] + "..."
+
+			var lineStyle lipgloss.Style
+			if isSelected {
+				lineStyle = selectedStyle
+			} else if hasClaude {
+				if isProcessing {
+					lineStyle = orangeBoldStyle
+				} else {
+					lineStyle = orangeStyle
+				}
+			} else {
+				lineStyle = normalStyle
 			}
-			rightSide.WriteString(style.Render(label))
-			rightSide.WriteString("\n")
-		}
-		if len(m.importList) > visibleCount {
-			rightSide.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Padding(0, 3).Render(fmt.Sprintf("  %d/%d tickets", m.importSelect+1, len(m.importList))))
+
+			indicatorStyle := lineStyle
+			if isProcessing && !isSelected {
+				indicatorStyle = orangeBoldStyle
+			}
+
+			ticketIDStyle := lineStyle
+			if ticketID == "_____" && !isSelected {
+				ticketIDStyle = dimStyle
+			}
+
+			loadedInfo := ""
+			if info, ok := m.ticketInfo[paneID]; ok {
+				loadedInfo = " " + info
+			}
+
+			line := fmt.Sprintf("%s%s %s %s%s",
+				cursorStr,
+				indicatorStyle.Render(indicator),
+				ticketIDStyle.Render(fmt.Sprintf("%-7s", ticketID)),
+				lineStyle.Render(dirName),
+				lineStyle.Render(loadedInfo),
+			)
+			rightSide.WriteString(line)
 			rightSide.WriteString("\n")
 		}
 		rightSide.WriteString("\n")
@@ -696,8 +625,47 @@ func (m model) View() string {
 	rightSide.WriteString(lipgloss.NewStyle().Padding(0, 1).Render(m.help.View(m.keys)))
 	rightSide.WriteString("\n")
 
-	// Join ASCII art on left with content on right
 	s.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, artRendered, rightSide.String()))
 
 	return s.String()
+}
+
+// loadPaneKeys reads key marker files for a given pane ID from /tmp/soap/keys/
+func loadPaneKeys(paneID string) map[string]bool {
+	keys := make(map[string]bool)
+	entries, err := os.ReadDir(keysDir)
+	if err != nil {
+		return keys
+	}
+	prefix := paneID + "."
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), prefix) {
+			key := strings.TrimPrefix(e.Name(), prefix)
+			if key != "" {
+				keys[key] = true
+			}
+		}
+	}
+	return keys
+}
+
+// extractTicketIDFromDir tries to extract a ticket ID from a directory name
+func extractTicketIDFromDir(dir string) string {
+	// Look for patterns like "story-12345-description" or just numeric IDs
+	parts := strings.Split(dir, "-")
+	for _, p := range parts {
+		if len(p) > 0 && p[0] >= '0' && p[0] <= '9' {
+			allDigits := true
+			for _, c := range p {
+				if c < '0' || c > '9' {
+					allDigits = false
+					break
+				}
+			}
+			if allDigits {
+				return p
+			}
+		}
+	}
+	return ""
 }

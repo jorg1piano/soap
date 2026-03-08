@@ -1,19 +1,20 @@
 # Example soap configuration
-# Commands use Go templates with available variables: {{.ID}}, {{.Title}}, {{.Worktree}}, {{.Index}}
+# Commands use Go templates with available variables: {{.ID}}, {{.Title}}
 
-# Create a new worktree for a ticket
-# Should output the path to the new worktree
-createWorktree: |
-  (git worktree add -b ticket/{{.ID}} .worktrees/{{.ID}} || git worktree add .worktrees/{{.ID}} ticket/{{.ID}}) 1>&2 && echo .worktrees/{{.ID}}
+# Command to list tickets (must output JSON array with id and title fields)
+# listTickets: |
+#   gh issue list --json number,title --jq '[.[] | {id: .number, title: .title}]'
 
-# Duplicate the current worktree (for working on same ticket in parallel)
-# Should output the path to the duplicated worktree
-duplicateWorktree: |
-  cli worktree duplicate {{.ID}}-{{.Index}} && echo .worktrees/{{.ID}}-{{.Index}}
+# Command to run when selecting a ticket (e.g. create worktree and open Claude)
+# onSelect: |
+#   WORKTREE=".worktrees/{{.ID}}"
+#   git worktree add -b ticket/{{.ID}} "$WORKTREE" 2>/dev/null || git worktree add "$WORKTREE" ticket/{{.ID}}
+#   cd "$WORKTREE" && claude
 
-# Optional setup commands to run after creating a worktree
-setup: |
-  echo "Working on ticket {{.ID}}: {{.Title}}" > README.ticket.md
+# Command to run when deleting a ticket (e.g. cleanup worktree)
+# onDelete: |
+#   git worktree remove --force ".worktrees/{{.ID}}" 2>/dev/null
+#   git branch -D ticket/{{.ID}} 2>/dev/null
 
 # Optional: URL template for opening tickets in browser
 openTicket: 'https://dev.azure.com/org/project/_workitems/edit/{{.ID}}'
@@ -22,13 +23,5 @@ openTicket: 'https://dev.azure.com/org/project/_workitems/edit/{{.ID}}'
 copyTicket: |
   echo "https://dev.azure.com/org/project/_workitems/edit/{{.ID}}" | pbcopy
 
-# Optional: Command to list external tickets for import (must output JSON array)
-# Example: Query your issue tracker and output tickets in JSON format
-# listTickets: |
-#   gh issue list --json number,title --jq '[.[] | {id: .number, title: .title}]'
-
-# Optional: Command to create a new ticket in external system
-# Should output the ticket ID of the created ticket
-# Template variables: {{.Type}} (story/bug/feature/chore/task), {{.Title}}
-# createTicket: |
-#   gh issue create --title "[{{.Type}}] {{.Title}}" --body "" --json number --jq '.number'
+# Optional: Command to load ticket details by ID (shown in terminal list)
+loadTicket: 'echo Ticket: {{.ID}}'

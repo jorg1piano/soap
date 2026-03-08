@@ -11,16 +11,13 @@ import (
 
 // Config represents the soap.yaml configuration
 type Config struct {
-	// Worktree commands
-	CreateWorktree    string `yaml:"createWorktree"`    // Template for creating a new worktree
-	DuplicateWorktree string `yaml:"duplicateWorktree"` // Template for duplicating current worktree
-	Setup             string `yaml:"setup"`             // Commands to run after worktree creation
-
 	// Ticket integration
-	OpenTicket   string `yaml:"openTicket"`   // URL template for opening tickets
-	CopyTicket   string `yaml:"copyTicket"`   // Command for copying ticket links
-	ListTickets  string `yaml:"listTickets"`  // Command to list external tickets (JSON output)
-	CreateTicket string `yaml:"createTicket"` // Command to create ticket in external system
+	ListTickets string `yaml:"listTickets"` // Command to list tickets (must output JSON array)
+	OnSelect    string `yaml:"onSelect"`    // Command to run when selecting a ticket
+	OnDelete    string `yaml:"onDelete"`    // Command to run when deleting a ticket
+	OpenTicket  string `yaml:"openTicket"`  // URL template for opening tickets in browser
+	CopyTicket  string `yaml:"copyTicket"`  // Command for copying ticket links
+	LoadTicket  string `yaml:"loadTicket"`  // Command to load ticket details by ID
 }
 
 // ExternalTicket represents a ticket from an external system
@@ -33,18 +30,24 @@ type ExternalTicket struct {
 	URL   string      `json:"url,omitempty"`   // Optional URL
 }
 
-// CreateTicketData holds data for rendering createTicket template
-type CreateTicketData struct {
-	Type  string // Ticket type (story, bug, feature, etc.)
-	Title string // Ticket title
+// TicketID returns the ID as a string regardless of underlying type
+func (t ExternalTicket) TicketID() string {
+	switch v := t.ID.(type) {
+	case string:
+		return v
+	case float64:
+		return fmt.Sprintf("%.0f", v)
+	case int:
+		return fmt.Sprintf("%d", v)
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 // TemplateData holds data for template rendering
 type TemplateData struct {
-	ID       string // Ticket ID
-	Title    string // Ticket title
-	Worktree string // Worktree path
-	Index    int    // Worktree index (for multiple worktrees)
+	ID    string // Ticket ID
+	Title string // Ticket title
 }
 
 // LoadConfig loads configuration from a YAML file
@@ -63,19 +66,6 @@ func LoadConfig(path string) (*Config, error) {
 // RenderTemplate renders a Go template string with the given data
 func RenderTemplate(tmpl string, data TemplateData) (string, error) {
 	t, err := template.New("tmpl").Parse(tmpl)
-	if err != nil {
-		return "", fmt.Errorf("parse template: %w", err)
-	}
-	var buf bytes.Buffer
-	if err := t.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("execute template: %w", err)
-	}
-	return buf.String(), nil
-}
-
-// RenderCreateTicketTemplate renders a createTicket template with the given data
-func RenderCreateTicketTemplate(tmpl string, data CreateTicketData) (string, error) {
-	t, err := template.New("createTicket").Parse(tmpl)
 	if err != nil {
 		return "", fmt.Errorf("parse template: %w", err)
 	}

@@ -1,11 +1,39 @@
 {
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.soap/soap register"
+          },
+          {
+            "type": "command",
+            "command": "~/.soap/soap add-key claude"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.soap/soap unregister"
+          },
+          {
+            "type": "command",
+            "command": "~/.soap/soap remove-key claude"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "~/.soap/soap idle"
+            "command": "~/.soap/soap remove-key claude-processing"
           }
         ]
       }
@@ -15,7 +43,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.soap/soap ping"
+            "command": "~/.soap/soap add-key claude-processing"
           }
         ]
       }
@@ -25,7 +53,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.soap/soap idle"
+            "command": "~/.soap/soap remove-key claude-processing"
           }
         ]
       }
@@ -36,7 +64,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "~/.soap/soap idle"
+            "command": "~/.soap/soap remove-key claude-processing"
           }
         ]
       }

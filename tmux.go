@@ -1,19 +1,18 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 )
 
 const tmuxSession = "soap"
 
-// TmuxManager manages tmux windows for Claude sessions
+// TmuxManager manages tmux windows
 type TmuxManager struct {
 	sessionID string
 	selfPath  string
+	selfPane  string
 }
 
 // NewTmuxManager creates a new TmuxManager
@@ -26,6 +25,7 @@ func NewTmuxManager() *TmuxManager {
 	return &TmuxManager{
 		sessionID: sid,
 		selfPath:  self,
+		selfPane:  os.Getenv("TMUX_PANE"),
 	}
 }
 
@@ -41,58 +41,36 @@ func (tm *TmuxManager) target(windowName string) string {
 	return tm.sessionID + ":" + windowName
 }
 
-// windowExists checks if a tmux window exists
-func (tm *TmuxManager) windowExists(name string) bool {
-	_, err := tmuxRun("display-message", "-t", tm.target(name), "-p", "#{window_id}")
-	return err == nil
-}
-
-// OpenClaudeSession opens a Claude session in tmux for a ticket
-func (tm *TmuxManager) OpenClaudeSession(ticket Ticket, worktree string) error {
-	windowName := fmt.Sprintf("ticket-%s", ticket.ID)
-
-	// Check if window already exists
-	if tm.windowExists(windowName) {
-		// Switch to existing window
-		_, err := tmuxRun("select-window", "-t", tm.target(windowName))
-		return err
-	}
-
-	// Create new window
-	args := []string{"new-window", "-t", tm.sessionID + ":", "-n", windowName}
-	_, err := tmuxRun(args...)
+// ListPanes queries tmux for all panes in the current session and returns terminals
+func (tm *TmuxManager) ListPanes() []Terminal {
+	out, err := tmuxRun("list-panes", "-s", "-t", tm.sessionID, "-F", "#{pane_id}\t#{pane_current_path}\t#{pane_pid}")
 	if err != nil {
-		return fmt.Errorf("new-window: %w", err)
+		return nil
 	}
 
-	target := tm.target(windowName)
-
-	// Change to worktree directory
-	if worktree != "" {
-		tmuxRun("send-keys", "-t", target, fmt.Sprintf("cd %q", worktree), "C-m")
-		time.Sleep(200 * time.Millisecond)
+	var terminals []Terminal
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 2 {
+			continue
+		}
+		paneID := parts[0]
+		// Skip our own pane
+		if paneID == tm.selfPane {
+			continue
+		}
+		term := Terminal{
+			PaneID:      paneID,
+			CurrentPath: parts[1],
+		}
+		if len(parts) >= 3 {
+			term.PID = parts[2]
+		}
+		terminals = append(terminals, term)
 	}
-
-	// Export SOAP_TICKET_ID for hooks
-	tmuxRun("send-keys", "-t", target, fmt.Sprintf("export SOAP_TICKET_ID=%q", ticket.ID), "C-m")
-	time.Sleep(100 * time.Millisecond)
-
-	// Launch Claude
-	tmuxRun("send-keys", "-t", target, "claude", "C-m")
-	time.Sleep(3 * time.Second)
-
-	// Auto-trust (select option 1)
-	tmuxRun("send-keys", "-t", target, "1")
-	time.Sleep(500 * time.Millisecond)
-	tmuxRun("send-keys", "-t", target, "C-m")
-
-	return nil
-}
-
-// CleanupTicket kills any tmux windows for a ticket
-func (tm *TmuxManager) CleanupTicket(ticketID string) {
-	windowName := fmt.Sprintf("ticket-%s", ticketID)
-	if tm.windowExists(windowName) {
-		tmuxRun("kill-window", "-t", tm.target(windowName))
-	}
+	return terminals
 }

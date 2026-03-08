@@ -5,12 +5,65 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
-	// Find and load configuration
+	// If no arguments, run TUI mode
+	if len(os.Args) < 2 {
+		configPath := FindConfigPath()
+		if configPath == "" {
+			log.Fatal("soap.yaml not found (looked next to binary and in cwd)")
+		}
+		cfg, err := LoadConfig(configPath)
+		if err != nil {
+			log.Fatalf("Failed to load config: %v", err)
+		}
+		runTUI(cfg)
+		return
+	}
+
+	cmd := os.Args[1]
+
+	// Commands that don't need config file or NATS connection
+	if cmd == "install-hooks" {
+		global := len(os.Args) > 2 && os.Args[2] == "--global"
+		installHooks(global)
+		return
+	}
+
+	if cmd == "install-tmux-hooks" {
+		installTmuxHooks()
+		return
+	}
+
+	if cmd == "help" || cmd == "--help" || cmd == "-h" {
+		runCLI(nil, nil, nil, nil)
+		return
+	}
+
+	// Commands that only need NATS (no config file required)
+	if cmd == "register" || cmd == "unregister" || cmd == "tick" || cmd == "add-key" || cmd == "remove-key" || cmd == "subscribe" {
+		store, err := NewClientStore()
+		if err != nil {
+			logFile, _ := os.OpenFile("/tmp/soap-register.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if logFile != nil {
+				fmt.Fprintf(logFile, "[%s] NATS connection error: %v\n", time.Now().Format(time.RFC3339), err)
+				logFile.Close()
+			}
+			fmt.Fprintf(os.Stderr, "Error connecting to soap server: %v\n", err)
+			os.Exit(1)
+		}
+		defer store.Close()
+
+		tmux := NewTmuxManager()
+		runCLI(os.Args[1:], nil, store, tmux)
+		return
+	}
+
+	// Commands that need config file (list, select, delete)
 	configPath := FindConfigPath()
 	if configPath == "" {
 		log.Fatal("soap.yaml not found (looked next to binary and in cwd)")
@@ -21,49 +74,8 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// If no arguments, run TUI mode
-	if len(os.Args) < 2 {
-		runTUI(cfg)
-		return
-	}
-
-	cmd := os.Args[1]
-
-	// Commands that don't need NATS connection
-	if cmd == "install-hooks" {
-		global := len(os.Args) > 2 && os.Args[2] == "--global"
-		installHooks(global)
-		return
-	}
-
-	// Server mode - starts embedded NATS server and keeps it running
-	if cmd == "server" {
-		fmt.Println("Starting soap server...")
-		store, err := NewServerStore()
-		if err != nil {
-			log.Fatalf("Failed to start server: %v", err)
-		}
-		defer store.Close()
-
-		fmt.Printf("Server running on port %d\n", natsPort)
-		fmt.Println("Press Ctrl+C to stop")
-
-		// Block forever
-		select {}
-	}
-
-	// Client mode - connect to existing server
-	store, err := NewClientStore()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to soap server: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Is the soap server running? Start it with: soap server\n")
-		os.Exit(1)
-	}
-	defer store.Close()
-
 	tmux := NewTmuxManager()
-
-	runCLI(os.Args[1:], cfg, store, tmux)
+	runCLI(os.Args[1:], cfg, nil, tmux)
 }
 
 func runTUI(cfg *Config) {
@@ -84,7 +96,7 @@ func runTUI(cfg *Config) {
 		return
 	}
 
-	// Connect to server
+	// Start embedded NATS server for pub/sub
 	store, err := NewServerStore()
 	if err != nil {
 		log.Fatalf("Failed to start store: %v", err)
