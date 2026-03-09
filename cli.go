@@ -461,7 +461,17 @@ func installHooksInDir(dir string) error {
 	}
 	template := strings.ReplaceAll(hooksTemplate, "~/.soap/soap", soapPath)
 
-	cmd := exec.Command("jq", "-s", ".[0] * .[1]", settingsFile, "-")
+	// Deep merge: for each hook event, append new entries to existing arrays
+	jqExpr := `.[0] as $existing | .[1] as $new |
+		$existing * {hooks: (
+			($existing.hooks // {}) as $eh |
+			($new.hooks // {}) as $nh |
+			reduce ($nh | keys[]) as $k ($eh;
+				.[$k] = ((.[$k] // []) + $nh[$k])
+			)
+		)}`
+
+	cmd := exec.Command("jq", "-s", jqExpr, settingsFile, "-")
 	cmd.Stdin = strings.NewReader(template)
 
 	output, err := cmd.CombinedOutput()
@@ -497,7 +507,16 @@ func installGlobalHooks() {
 	}
 	template := strings.ReplaceAll(hooksTemplate, "~/.soap/soap", soapPath)
 
-	cmd := exec.Command("jq", "-s", ".[0] * .[1]", settingsFile, "-")
+	jqExpr := `.[0] as $existing | .[1] as $new |
+		$existing * {hooks: (
+			($existing.hooks // {}) as $eh |
+			($new.hooks // {}) as $nh |
+			reduce ($nh | keys[]) as $k ($eh;
+				.[$k] = ((.[$k] // []) + $nh[$k])
+			)
+		)}`
+
+	cmd := exec.Command("jq", "-s", jqExpr, settingsFile, "-")
 	cmd.Stdin = strings.NewReader(template)
 
 	output, err := cmd.CombinedOutput()
