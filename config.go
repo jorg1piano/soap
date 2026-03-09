@@ -15,7 +15,8 @@ type Config struct {
 	ListTickets string `yaml:"listTickets"` // Command to list tickets (must output JSON array)
 	OnSelect    string `yaml:"onSelect"`    // Command to run when selecting a ticket
 	OnDelete    string `yaml:"onDelete"`    // Command to run when deleting a ticket
-	OpenTicket  string `yaml:"openTicket"`  // URL template for opening tickets in browser
+	FreeclaudeDir string `yaml:"freeclaudeDir"` // Directory to open free Claude sessions in
+	OpenTicket    string `yaml:"openTicket"`    // URL template for opening tickets in browser
 	CopyTicket  string `yaml:"copyTicket"`  // Command for copying ticket links
 	LoadTicket  string `yaml:"loadTicket"`  // Command to load ticket details by ID
 }

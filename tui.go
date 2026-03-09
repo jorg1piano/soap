@@ -2,6 +2,7 @@ package main
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -70,7 +71,7 @@ type model struct {
 	terminals       map[string]Terminal // pane_id -> terminal info
 	terminalPaneIDs []string            // sorted list of pane IDs for selection
 	terminalCursor  int                 // cursor position in terminals list
-	ticketInfo      map[string]string   // pane_id -> loadTicket output
+	ticketInfo      map[string]TicketInfo // pane_id -> loadTicket output
 	animFrame       int                 // animation frame counter for spinners
 }
 
@@ -81,8 +82,14 @@ type listTicketsMsg struct {
 	tickets []ExternalTicket
 	err     error
 }
+type TicketInfo struct {
+	ID          string `json:"id,omitempty"`
+	Title       string `json:"title,omitempty"`
+	Description string `json:"description,omitempty"`
+	Status      string `json:"status,omitempty"`
+}
 type ticketInfoMsg struct {
-	info map[string]string
+	info map[string]TicketInfo
 }
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
@@ -113,7 +120,7 @@ func initialModel(store *Store, tmux *TmuxManager, cfg *Config) model {
 		help:       h,
 		status:     "Loading tickets...",
 		terminals:  make(map[string]Terminal),
-		ticketInfo: make(map[string]string),
+		ticketInfo: make(map[string]TicketInfo),
 	}
 	return m
 }
@@ -163,7 +170,7 @@ func (m *model) refreshTicketInfoCmd() tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		info := make(map[string]string)
+		info := make(map[string]TicketInfo)
 		for paneID, term := range terminals {
 			dir := filepath.Base(term.CurrentPath)
 			ticketID := extractTicketIDFromDir(dir)
@@ -179,7 +186,12 @@ func (m *model) refreshTicketInfoCmd() tea.Cmd {
 			if err != nil {
 				continue
 			}
-			info[paneID] = strings.TrimSpace(string(out))
+			var ti TicketInfo
+			if jsonErr := json.Unmarshal(out, &ti); jsonErr != nil {
+				// Fall back to plain text as title
+				ti.Title = strings.TrimSpace(string(out))
+			}
+			info[paneID] = ti
 		}
 		return ticketInfoMsg{info: info}
 	}
@@ -311,6 +323,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleSelect() (tea.Model, tea.Cmd) {
+	// If a terminal pane is selected, switch to it
+	if m.cursor >= len(m.tickets) && len(m.terminalPaneIDs) > 0 {
+		return m.handleShell()
+	}
+
 	t := m.selectedTicket()
 	if t == nil {
 		m.status = "No ticket selected"
@@ -433,11 +450,18 @@ func (m model) handleFreeClaude() (tea.Model, tea.Cmd) {
 	m.status = "Opening free Claude session..."
 	tmux := m.tmux
 
+	cfg := m.cfg
+
 	return m, func() tea.Msg {
 		windowName := "claude-free"
 		_, err := tmuxRun("select-window", "-t", tmux.target(windowName))
 		if err != nil {
-			_, err = tmuxRun("new-window", "-t", tmux.sessionID+":", "-n", windowName, "claude")
+			args := []string{"new-window", "-t", tmux.sessionID + ":", "-n", windowName}
+			if cfg.FreeclaudeDir != "" {
+				args = append(args, "-c", cfg.FreeclaudeDir)
+			}
+			args = append(args, "claude")
+			_, err = tmuxRun(args...)
 		}
 		if err != nil {
 			return statusMsg{msg: fmt.Sprintf("Error: %v", err)}
@@ -446,20 +470,37 @@ func (m model) handleFreeClaude() (tea.Model, tea.Cmd) {
 	}
 }
 
+// selectedTemplateData resolves template data from the selected ticket or terminal
+func (m model) selectedTemplateData() *TemplateData {
+	// Try ticket list first
+	if t := m.selectedTicket(); t != nil {
+		return &TemplateData{ID: t.TicketID(), Title: t.Title}
+	}
+	// Fall back to selected terminal
+	if m.cursor >= len(m.tickets) && m.terminalCursor < len(m.terminalPaneIDs) {
+		paneID := m.terminalPaneIDs[m.terminalCursor]
+		if info, ok := m.ticketInfo[paneID]; ok && info.ID != "" {
+			return &TemplateData{ID: info.ID, Title: info.Title}
+		}
+		term := m.terminals[paneID]
+		if id := extractTicketIDFromDir(filepath.Base(term.CurrentPath)); id != "" {
+			return &TemplateData{ID: id}
+		}
+	}
+	return nil
+}
+
 func (m model) handleOpenTicket() (tea.Model, tea.Cmd) {
 	if m.cfg.OpenTicket == "" {
 		m.status = "No openTicket configured in soap.yaml"
 		return m, nil
 	}
-	t := m.selectedTicket()
-	if t == nil {
+	data := m.selectedTemplateData()
+	if data == nil {
 		m.status = "No ticket selected"
 		return m, nil
 	}
-	url, err := RenderTemplate(m.cfg.OpenTicket, TemplateData{
-		ID:    t.TicketID(),
-		Title: t.Title,
-	})
+	url, err := RenderTemplate(m.cfg.OpenTicket, *data)
 	if err != nil {
 		m.status = fmt.Sprintf("Template error: %v", err)
 		return m, nil
@@ -479,15 +520,12 @@ func (m model) handleCopyTicket() (tea.Model, tea.Cmd) {
 		m.status = "No copyTicket configured in soap.yaml"
 		return m, nil
 	}
-	t := m.selectedTicket()
-	if t == nil {
+	data := m.selectedTemplateData()
+	if data == nil {
 		m.status = "No ticket selected"
 		return m, nil
 	}
-	rendered, err := RenderTemplate(m.cfg.CopyTicket, TemplateData{
-		ID:    t.TicketID(),
-		Title: t.Title,
-	})
+	rendered, err := RenderTemplate(m.cfg.CopyTicket, *data)
 	if err != nil {
 		m.status = fmt.Sprintf("Template error: %v", err)
 		return m, nil
@@ -497,7 +535,7 @@ func (m model) handleCopyTicket() (tea.Model, tea.Cmd) {
 	if err := cmd.Run(); err != nil {
 		m.status = fmt.Sprintf("Copy failed: %v", err)
 	} else {
-		m.status = fmt.Sprintf("Copied link for #%s", t.TicketID())
+		m.status = fmt.Sprintf("Copied link for #%s", data.ID)
 	}
 	return m, nil
 }
@@ -554,9 +592,11 @@ func (m model) View() string {
 			hasClaude := term.Keys["claude"]
 			isProcessing := term.Keys["claude-processing"]
 
-			ticketID := "_____"
 			dirName := filepath.Base(term.CurrentPath)
-			if id := extractTicketIDFromDir(dirName); id != "" {
+			ticketID := "_____"
+			if info, ok := m.ticketInfo[paneID]; ok && info.ID != "" {
+				ticketID = info.ID
+			} else if id := extractTicketIDFromDir(dirName); id != "" {
 				ticketID = id
 			}
 
@@ -595,19 +635,62 @@ func (m model) View() string {
 				ticketIDStyle = dimStyle
 			}
 
-			loadedInfo := ""
-			if info, ok := m.ticketInfo[paneID]; ok {
-				loadedInfo = " " + info
+		dirStyle := lipgloss.NewStyle().
+				Background(lipgloss.Color("236")).
+				Foreground(lipgloss.Color("252")).
+				Padding(0, 1)
+			if isSelected {
+				dirStyle = dirStyle.Background(lipgloss.Color("33")).Foreground(lipgloss.Color("15"))
 			}
 
-			line := fmt.Sprintf("%s%s %s %s%s",
+			info, hasInfo := m.ticketInfo[paneID]
+
+			// Two-column layout with fixed-width left column
+			// Left col: cursor(2) + indicator(2) + ticketID(8) = 12 visible chars
+			leftColWidth := 12
+
+			// Line 1: ticketID | folder badge
+			leftCol1 := fmt.Sprintf("%s%s %s",
 				cursorStr,
 				indicatorStyle.Render(indicator),
 				ticketIDStyle.Render(fmt.Sprintf("%-7s", ticketID)),
-				lineStyle.Render(dirName),
-				lineStyle.Render(loadedInfo),
 			)
-			rightSide.WriteString(line)
+			rightSide.WriteString(fmt.Sprintf("%s  %s", leftCol1, dirStyle.Render(dirName)))
+			rightSide.WriteString("\n")
+
+			// Line 2: status | title
+			hasLine2 := (hasInfo && info.Status != "") || (hasInfo && info.Title != "")
+			if hasLine2 {
+				statusText := ""
+				if hasInfo && info.Status != "" {
+					statusText = info.Status
+				}
+				statusStyle := dimStyle
+				if isSelected {
+					statusStyle = selectedStyle
+				}
+				leftCol2 := fmt.Sprintf("%-*s", leftColWidth, "    "+statusText)
+				leftCol2Rendered := statusStyle.Render(leftCol2)
+
+				titleText := ""
+				if hasInfo && info.Title != "" {
+					titleText = info.Title
+				}
+				if titleText != "" {
+					rightSide.WriteString(fmt.Sprintf("%s  %s", leftCol2Rendered, lineStyle.Render(titleText)))
+				} else {
+					rightSide.WriteString(leftCol2Rendered)
+				}
+				rightSide.WriteString("\n")
+			}
+
+			// Line 3: description (right column only)
+			if hasInfo && info.Description != "" {
+				descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
+				pad := fmt.Sprintf("%-*s", leftColWidth, "")
+				rightSide.WriteString(fmt.Sprintf("%s  %s", pad, descStyle.Render(info.Description)))
+				rightSide.WriteString("\n")
+			}
 			rightSide.WriteString("\n")
 		}
 		rightSide.WriteString("\n")

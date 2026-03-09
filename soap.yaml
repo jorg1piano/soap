@@ -24,4 +24,7 @@ copyTicket: |
   echo "https://dev.azure.com/org/project/_workitems/edit/{{.ID}}" | pbcopy
 
 # Optional: Command to load ticket details by ID (shown in terminal list)
-loadTicket: 'echo Ticket: {{.ID}}'
+loadTicket: |
+  echo '{"id": "{{.ID}}", "status": "active", "title": "Some ticket", "description": "Detailed description here. This can be pretty long. And be multiline. Be prepared to render some really long lines."}'
+
+freeclaudeDir: /tmp/freeclaude
