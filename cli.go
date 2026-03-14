@@ -339,7 +339,8 @@ func handleAddKey(args []string, store *Store) {
 
 	os.MkdirAll(keysDir, 0755)
 
-	keyFile := filepath.Join(keysDir, paneID+"."+keyName)
+	sessionID := readSessionID()
+	keyFile := keyFilePath(paneID, keyName, sessionID)
 	os.WriteFile(keyFile, []byte{}, 0644)
 
 	metadata := map[string]string{
@@ -349,7 +350,7 @@ func handleAddKey(args []string, store *Store) {
 	data, _ := json.Marshal(metadata)
 	store.Publish("soap.add-key", data)
 
-	fmt.Printf("Added key %s to pane %s\n", keyName, paneID)
+	fmt.Printf("Added key %s to pane %s (session=%s)\n", keyName, paneID, sessionID)
 }
 
 func handleRemoveKey(args []string, store *Store) {
@@ -370,7 +371,8 @@ func handleRemoveKey(args []string, store *Store) {
 		return
 	}
 
-	keyFile := filepath.Join(keysDir, paneID+"."+keyName)
+	sessionID := readSessionID()
+	keyFile := keyFilePath(paneID, keyName, sessionID)
 	os.Remove(keyFile)
 
 	metadata := map[string]string{
@@ -380,7 +382,31 @@ func handleRemoveKey(args []string, store *Store) {
 	data, _ := json.Marshal(metadata)
 	store.Publish("soap.remove-key", data)
 
-	fmt.Printf("Removed key %s from pane %s\n", keyName, paneID)
+	fmt.Printf("Removed key %s from pane %s (session=%s)\n", keyName, paneID, sessionID)
+}
+
+// readSessionID reads the session_id from stdin JSON (piped by Claude Code hooks).
+// Falls back to "default" when not running inside a hook.
+func readSessionID() string {
+	// Only read stdin if it's a pipe (not a terminal)
+	if stat, err := os.Stdin.Stat(); err == nil && (stat.Mode()&os.ModeCharDevice) == 0 {
+		var input map[string]interface{}
+		if err := json.NewDecoder(os.Stdin).Decode(&input); err == nil {
+			if sid, ok := input["session_id"].(string); ok && sid != "" {
+				// Replace dots and slashes to avoid breaking key file name parsing
+				sid = strings.ReplaceAll(sid, ".", "_")
+				sid = strings.ReplaceAll(sid, "/", "_")
+				return sid
+			}
+		}
+	}
+	return "default"
+}
+
+// keyFilePath returns the path for a session-scoped key marker file.
+// Format: {paneID}.{keyName}.{sessionID}
+func keyFilePath(paneID, keyName, sessionID string) string {
+	return filepath.Join(keysDir, paneID+"."+keyName+"."+sessionID)
 }
 
 func handleTick(store *Store) {

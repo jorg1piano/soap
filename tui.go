@@ -848,6 +848,7 @@ func (m model) View() string {
 }
 
 // loadPaneKeys reads key marker files for a given pane ID from /tmp/soap/keys/
+// Files are named {paneID}.{keyName}.{sessionID} — a key is active if any session file exists for it.
 func loadPaneKeys(paneID string) map[string]bool {
 	keys := make(map[string]bool)
 	entries, err := os.ReadDir(keysDir)
@@ -856,11 +857,16 @@ func loadPaneKeys(paneID string) map[string]bool {
 	}
 	prefix := paneID + "."
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), prefix) {
-			key := strings.TrimPrefix(e.Name(), prefix)
-			if key != "" {
-				keys[key] = true
-			}
+		name := e.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		rest := strings.TrimPrefix(name, prefix)
+		// rest is either "keyName.sessionID" (new format) or "keyName" (legacy)
+		if idx := strings.Index(rest, "."); idx > 0 {
+			keys[rest[:idx]] = true
+		} else if rest != "" {
+			keys[rest] = true
 		}
 	}
 	return keys
