@@ -13,6 +13,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -25,6 +26,8 @@ var asciiArt string
 type keyMap struct {
 	Up         key.Binding
 	Down       key.Binding
+	MoveUp     key.Binding
+	MoveDown   key.Binding
 	Select     key.Binding
 	Delete     key.Binding
 	Editor     key.Binding
@@ -32,6 +35,7 @@ type keyMap struct {
 	FreeClaude key.Binding
 	OpenTicket key.Binding
 	CopyTicket key.Binding
+	Rename     key.Binding
 	Quit       key.Binding
 }
 
@@ -39,6 +43,8 @@ func newKeyMap() keyMap {
 	return keyMap{
 		Up:         key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 		Down:       key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		MoveUp:     key.NewBinding(key.WithKeys("shift+up", "K"), key.WithHelp("⇧↑/K", "move up")),
+		MoveDown:   key.NewBinding(key.WithKeys("shift+down", "J"), key.WithHelp("⇧↓/J", "move down")),
 		Select:     key.NewBinding(key.WithKeys("enter", "c"), key.WithHelp("enter/c", "select")),
 		Delete:     key.NewBinding(key.WithKeys("d", "backspace"), key.WithHelp("d", "delete")),
 		Editor:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "vscode")),
@@ -46,12 +52,13 @@ func newKeyMap() keyMap {
 		FreeClaude: key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "free claude")),
 		OpenTicket: key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open ticket")),
 		CopyTicket: key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "copy link")),
+		Rename:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "label")),
 		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Select, k.Editor, k.Shell, k.FreeClaude, k.OpenTicket, k.CopyTicket, k.Delete, k.Quit}
+	return []key.Binding{k.Select, k.MoveUp, k.MoveDown, k.Rename, k.Editor, k.Shell, k.FreeClaude, k.OpenTicket, k.CopyTicket, k.Delete, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
@@ -73,6 +80,10 @@ type model struct {
 	terminalCursor  int                 // cursor position in terminals list
 	ticketInfo      map[string]TicketInfo // pane_id -> loadTicket output
 	animFrame       int                 // animation frame counter for spinners
+	labels          map[string]string   // item key -> free text label
+	renaming        bool                // whether we're in label-edit mode
+	renameInput     textinput.Model     // text input for label editing
+	renameKey       string              // key of item being labeled
 }
 
 type tickMsg struct{}
@@ -112,15 +123,21 @@ func initialModel(store *Store, tmux *TmuxManager, cfg *Config) model {
 	h.Styles.ShortDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	h.Styles.ShortSeparator = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 
+	ti := textinput.New()
+	ti.Prompt = "Label: "
+	ti.CharLimit = 60
+
 	m := model{
-		store:      store,
-		tmux:       tmux,
-		cfg:        cfg,
-		keys:       newKeyMap(),
-		help:       h,
-		status:     "Loading tickets...",
-		terminals:  make(map[string]Terminal),
-		ticketInfo: make(map[string]TicketInfo),
+		store:       store,
+		tmux:        tmux,
+		cfg:         cfg,
+		keys:        newKeyMap(),
+		help:        h,
+		status:      "Loading tickets...",
+		terminals:   make(map[string]Terminal),
+		ticketInfo:  make(map[string]TicketInfo),
+		labels:      make(map[string]string),
+		renameInput: ti,
 	}
 	return m
 }
@@ -134,25 +151,36 @@ func (m *model) fetchTicketsCmd() tea.Cmd {
 }
 
 func (m *model) updateTerminalList() {
-	var selectedPaneID string
-	if m.terminalCursor < len(m.terminalPaneIDs) {
-		selectedPaneID = m.terminalPaneIDs[m.terminalCursor]
-	}
-
-	m.terminalPaneIDs = make([]string, 0, len(m.terminals))
+	// Build set of current pane IDs
+	current := make(map[string]bool, len(m.terminals))
 	for paneID := range m.terminals {
-		m.terminalPaneIDs = append(m.terminalPaneIDs, paneID)
+		current[paneID] = true
 	}
-	sort.Strings(m.terminalPaneIDs)
 
-	if selectedPaneID != "" {
-		for i, id := range m.terminalPaneIDs {
-			if id == selectedPaneID {
-				m.terminalCursor = i
-				return
-			}
+	// Remove gone panes from existing order
+	kept := make([]string, 0, len(m.terminalPaneIDs))
+	for _, id := range m.terminalPaneIDs {
+		if current[id] {
+			kept = append(kept, id)
 		}
 	}
+
+	// Find new panes not in existing order
+	existing := make(map[string]bool, len(kept))
+	for _, id := range kept {
+		existing[id] = true
+	}
+	var newPanes []string
+	for paneID := range m.terminals {
+		if !existing[paneID] {
+			newPanes = append(newPanes, paneID)
+		}
+	}
+	sort.Strings(newPanes)
+
+	m.terminalPaneIDs = append(kept, newPanes...)
+
+	// Fix cursor bounds
 	if m.terminalCursor >= len(m.terminalPaneIDs) {
 		m.terminalCursor = max(0, len(m.terminalPaneIDs)-1)
 	}
@@ -261,9 +289,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(tickCmd(), m.fetchTicketsCmd(), m.refreshTicketInfoCmd())
 
 	case tea.KeyMsg:
+		// Handle label editing mode
+		if m.renaming {
+			switch msg.Type {
+			case tea.KeyEnter:
+				label := strings.TrimSpace(m.renameInput.Value())
+				if label == "" {
+					delete(m.labels, m.renameKey)
+				} else {
+					m.labels[m.renameKey] = label
+				}
+				m.renaming = false
+				m.status = "Ready"
+				return m, nil
+			case tea.KeyEscape:
+				m.renaming = false
+				m.status = "Ready"
+				return m, nil
+			default:
+				var cmd tea.Cmd
+				m.renameInput, cmd = m.renameInput.Update(msg)
+				return m, cmd
+			}
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
+		case key.Matches(msg, m.keys.MoveUp):
+			if m.cursor < len(m.tickets) {
+				// In tickets section
+				if m.cursor > 0 {
+					m.tickets[m.cursor], m.tickets[m.cursor-1] = m.tickets[m.cursor-1], m.tickets[m.cursor]
+					m.cursor--
+				}
+			} else if len(m.terminalPaneIDs) > 0 && m.terminalCursor > 0 {
+				// In terminals section
+				m.terminalPaneIDs[m.terminalCursor], m.terminalPaneIDs[m.terminalCursor-1] = m.terminalPaneIDs[m.terminalCursor-1], m.terminalPaneIDs[m.terminalCursor]
+				m.terminalCursor--
+			}
+		case key.Matches(msg, m.keys.MoveDown):
+			if m.cursor < len(m.tickets) {
+				// In tickets section
+				if m.cursor < len(m.tickets)-1 {
+					m.tickets[m.cursor], m.tickets[m.cursor+1] = m.tickets[m.cursor+1], m.tickets[m.cursor]
+					m.cursor++
+				}
+			} else if len(m.terminalPaneIDs) > 0 && m.terminalCursor < len(m.terminalPaneIDs)-1 {
+				// In terminals section
+				m.terminalPaneIDs[m.terminalCursor], m.terminalPaneIDs[m.terminalCursor+1] = m.terminalPaneIDs[m.terminalCursor+1], m.terminalPaneIDs[m.terminalCursor]
+				m.terminalCursor++
+			}
 		case key.Matches(msg, m.keys.Up):
 			totalItems := len(m.tickets) + len(m.terminalPaneIDs)
 			if totalItems == 0 {
@@ -316,10 +392,38 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleOpenTicket()
 		case key.Matches(msg, m.keys.CopyTicket):
 			return m.handleCopyTicket()
+		case key.Matches(msg, m.keys.Rename):
+			return m.handleRename()
 		}
 	}
 
 	return m, nil
+}
+
+// selectedItemKey returns a stable key for the currently selected item (ticket ID or pane ID)
+func (m model) selectedItemKey() string {
+	if m.cursor < len(m.tickets) {
+		return "ticket:" + m.tickets[m.cursor].TicketID()
+	}
+	if m.cursor >= len(m.tickets) && m.terminalCursor < len(m.terminalPaneIDs) {
+		return "pane:" + m.terminalPaneIDs[m.terminalCursor]
+	}
+	return ""
+}
+
+func (m model) handleRename() (tea.Model, tea.Cmd) {
+	itemKey := m.selectedItemKey()
+	if itemKey == "" {
+		m.status = "Nothing selected"
+		return m, nil
+	}
+	m.renaming = true
+	m.renameKey = itemKey
+	m.renameInput.SetValue(m.labels[itemKey])
+	m.renameInput.Focus()
+	m.renameInput.CursorEnd()
+	m.status = "Enter label (enter to confirm, esc to cancel)"
+	return m, m.renameInput.Focus()
 }
 
 func (m model) handleSelect() (tea.Model, tea.Cmd) {
@@ -543,7 +647,18 @@ func (m model) handleCopyTicket() (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var s strings.Builder
 
-	artStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Padding(0, 2, 0, 0)
+	hasCladeSessions := false
+	for _, term := range m.terminals {
+		if term.Keys["claude"] {
+			hasCladeSessions = true
+			break
+		}
+	}
+	artColor := lipgloss.Color("99")
+	if !hasCladeSessions {
+		artColor = lipgloss.Color("196")
+	}
+	artStyle := lipgloss.NewStyle().Foreground(artColor).Padding(0, 2, 0, 0)
 	artRendered := artStyle.Render(asciiArt)
 
 	var rightSide strings.Builder
@@ -567,6 +682,13 @@ func (m model) View() string {
 			}
 
 			line := fmt.Sprintf("%s%-10s %s", cursor, t.TicketID(), t.Title)
+			if label, ok := m.labels["ticket:"+t.TicketID()]; ok {
+				labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Italic(true)
+				if i == m.cursor {
+					labelStyle = labelStyle.Foreground(lipgloss.Color("33"))
+				}
+				line += "  " + labelStyle.Render("["+label+"]")
+			}
 
 			rightSide.WriteString(style.Render(line))
 			rightSide.WriteString("\n")
@@ -655,7 +777,15 @@ func (m model) View() string {
 				indicatorStyle.Render(indicator),
 				ticketIDStyle.Render(fmt.Sprintf("%-7s", ticketID)),
 			)
-			rightSide.WriteString(fmt.Sprintf("%s  %s", leftCol1, dirStyle.Render(dirName)))
+			labelStr := ""
+			if label, ok := m.labels["pane:"+paneID]; ok {
+				labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("213")).Italic(true)
+				if isSelected {
+					labelStyle = labelStyle.Foreground(lipgloss.Color("33"))
+				}
+				labelStr = "  " + labelStyle.Render("["+label+"]")
+			}
+			rightSide.WriteString(fmt.Sprintf("%s  %s%s", leftCol1, dirStyle.Render(dirName), labelStr))
 			rightSide.WriteString("\n")
 
 			// Line 2: status | title
@@ -701,7 +831,11 @@ func (m model) View() string {
 		rightSide.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render(fmt.Sprintf("  Error: %v", m.err)))
 		rightSide.WriteString("\n")
 	}
-	rightSide.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true).Render(fmt.Sprintf("  %s", m.status)))
+	if m.renaming {
+		rightSide.WriteString("  " + m.renameInput.View())
+	} else {
+		rightSide.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true).Render(fmt.Sprintf("  %s", m.status)))
+	}
 	rightSide.WriteString("\n\n")
 
 	// Help
