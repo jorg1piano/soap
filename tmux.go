@@ -43,7 +43,7 @@ func (tm *TmuxManager) target(windowName string) string {
 
 // ListPanes queries tmux for all panes in the current session and returns terminals
 func (tm *TmuxManager) ListPanes() []Terminal {
-	out, err := tmuxRun("list-panes", "-s", "-t", tm.sessionID, "-F", "#{pane_id}\t#{pane_current_path}\t#{pane_pid}")
+	out, err := tmuxRun("list-panes", "-s", "-t", tm.sessionID, "-F", "#{pane_id}\t#{pane_current_path}\t#{pane_pid}\t#{window_id}\t#{window_name}")
 	if err != nil {
 		return nil
 	}
@@ -54,7 +54,7 @@ func (tm *TmuxManager) ListPanes() []Terminal {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
+		parts := strings.SplitN(line, "\t", 5)
 		if len(parts) < 2 {
 			continue
 		}
@@ -69,6 +69,12 @@ func (tm *TmuxManager) ListPanes() []Terminal {
 		}
 		if len(parts) >= 3 {
 			term.PID = parts[2]
+		}
+		if len(parts) >= 4 {
+			term.WindowID = parts[3]
+		}
+		if len(parts) >= 5 {
+			term.WindowName = parts[4]
 		}
 		terminals = append(terminals, term)
 	}

@@ -165,20 +165,30 @@ func (m *model) updateTerminalList() {
 		}
 	}
 
-	// Find new panes not in existing order
+	// Find new panes not in existing order, grouped by window
 	existing := make(map[string]bool, len(kept))
 	for _, id := range kept {
 		existing[id] = true
 	}
-	var newPanes []string
+	windowNewPanes := make(map[string][]string)
 	for paneID := range m.terminals {
 		if !existing[paneID] {
-			newPanes = append(newPanes, paneID)
+			wid := m.terminals[paneID].WindowID
+			windowNewPanes[wid] = append(windowNewPanes[wid], paneID)
 		}
 	}
-	sort.Strings(newPanes)
+	// Sort new panes within each window, then append windows in order
+	var windowIDs []string
+	for wid := range windowNewPanes {
+		sort.Strings(windowNewPanes[wid])
+		windowIDs = append(windowIDs, wid)
+	}
+	sort.Strings(windowIDs)
+	for _, wid := range windowIDs {
+		kept = append(kept, windowNewPanes[wid]...)
+	}
 
-	m.terminalPaneIDs = append(kept, newPanes...)
+	m.terminalPaneIDs = kept
 
 	// Fix cursor bounds
 	if m.terminalCursor >= len(m.terminalPaneIDs) {
@@ -699,17 +709,30 @@ func (m model) View() string {
 
 	// Registered terminals section
 	if len(m.terminals) > 0 {
-		rightSide.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true).Render("Terminals"))
-		rightSide.WriteString("\n")
-
 		orangeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF8C00"))
 		orangeBoldStyle := orangeStyle.Bold(true)
 		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 		selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
+		windowHeaderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)
 
+		lastWindowID := ""
 		for i, paneID := range m.terminalPaneIDs {
 			term := m.terminals[paneID]
+
+			// Window group header
+			if term.WindowID != lastWindowID {
+				if lastWindowID != "" {
+					rightSide.WriteString("\n")
+				}
+				windowLabel := term.WindowName
+				if windowLabel == "" {
+					windowLabel = term.WindowID
+				}
+				rightSide.WriteString(windowHeaderStyle.Render(fmt.Sprintf("  %s", windowLabel)))
+				rightSide.WriteString("\n")
+				lastWindowID = term.WindowID
+			}
 			isSelected := i == m.terminalCursor && m.cursor >= len(m.tickets)
 			hasClaude := term.Keys["claude"]
 			isProcessing := term.Keys["claude-processing"]
