@@ -1,0 +1,81 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "SOAP_PATH remove-key claude-processing",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "SOAP_PATH remove-key claude-processing",
+            "type": "command"
+          }
+        ],
+        "matcher": "AskUserQuestion"
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "SOAP_PATH unregister",
+            "type": "command"
+          },
+          {
+            "command": "SOAP_PATH remove-key claude",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "echo my-custom-hook",
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "SOAP_PATH register",
+            "type": "command"
+          },
+          {
+            "command": "SOAP_PATH add-key claude",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "SOAP_PATH remove-key claude-processing",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "SOAP_PATH add-key claude-processing",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

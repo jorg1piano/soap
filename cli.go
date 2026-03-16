@@ -485,33 +485,28 @@ func installHooksInDir(dir string) error {
 	if err != nil {
 		soapPath = "~/.soap/soap"
 	}
-	template := strings.ReplaceAll(hooksTemplate, "~/.soap/soap", soapPath)
+	tmpl := strings.ReplaceAll(hooksTemplate, "~/.soap/soap", soapPath)
 
-	// Deep merge: for each hook event, append new entries to existing arrays
-	jqExpr := `.[0] as $existing | .[1] as $new |
-		$existing * {hooks: (
-			($existing.hooks // {}) as $eh |
-			($new.hooks // {}) as $nh |
-			reduce ($nh | keys[]) as $k ($eh;
-				.[$k] = ((.[$k] // []) + $nh[$k])
-			)
-		)}`
-
-	cmd := exec.Command("jq", "-s", jqExpr, settingsFile, "-")
-	cmd.Stdin = strings.NewReader(template)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if _, statErr := os.Stat(settingsFile); os.IsNotExist(statErr) {
-			if err := os.WriteFile(settingsFile, []byte(template), 0644); err != nil {
-				return fmt.Errorf("writing settings.json: %w", err)
-			}
-			return nil
-		}
-		return fmt.Errorf("running jq: %w: %s", err, output)
+	var newSettings ClaudeSettings
+	if err := json.Unmarshal([]byte(tmpl), &newSettings); err != nil {
+		return fmt.Errorf("parsing hooks template: %w", err)
 	}
 
-	if err := os.WriteFile(settingsFile, output, 0644); err != nil {
+	existing := &ClaudeSettings{}
+	if data, err := os.ReadFile(settingsFile); err == nil {
+		if err := json.Unmarshal(data, existing); err != nil {
+			return fmt.Errorf("parsing existing settings: %w", err)
+		}
+	}
+
+	merged := mergeHooks(existing, &newSettings)
+
+	output, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling settings: %w", err)
+	}
+
+	if err := os.WriteFile(settingsFile, append(output, '\n'), 0644); err != nil {
 		return fmt.Errorf("writing settings.json: %w", err)
 	}
 
@@ -531,35 +526,31 @@ func installGlobalHooks() {
 	if err != nil {
 		soapPath = "soap"
 	}
-	template := strings.ReplaceAll(hooksTemplate, "~/.soap/soap", soapPath)
+	tmpl := strings.ReplaceAll(hooksTemplate, "~/.soap/soap", soapPath)
 
-	jqExpr := `.[0] as $existing | .[1] as $new |
-		$existing * {hooks: (
-			($existing.hooks // {}) as $eh |
-			($new.hooks // {}) as $nh |
-			reduce ($nh | keys[]) as $k ($eh;
-				.[$k] = ((.[$k] // []) + $nh[$k])
-			)
-		)}`
-
-	cmd := exec.Command("jq", "-s", jqExpr, settingsFile, "-")
-	cmd.Stdin = strings.NewReader(template)
-
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		if _, statErr := os.Stat(settingsFile); os.IsNotExist(statErr) {
-			if err := os.WriteFile(settingsFile, []byte(template), 0644); err != nil {
-				fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", settingsFile, err)
-				os.Exit(1)
-			}
-			fmt.Println("✓ Installed soap hooks globally")
-			return
-		}
-		fmt.Fprintf(os.Stderr, "Error running jq: %v: %s\n", err, output)
+	var newSettings ClaudeSettings
+	if err := json.Unmarshal([]byte(tmpl), &newSettings); err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing hooks template: %v\n", err)
 		os.Exit(1)
 	}
 
-	if err := os.WriteFile(settingsFile, output, 0644); err != nil {
+	existing := &ClaudeSettings{}
+	if data, err := os.ReadFile(settingsFile); err == nil {
+		if err := json.Unmarshal(data, existing); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing %s: %v\n", settingsFile, err)
+			os.Exit(1)
+		}
+	}
+
+	merged := mergeHooks(existing, &newSettings)
+
+	output, err := json.MarshalIndent(merged, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error marshaling settings: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := os.WriteFile(settingsFile, append(output, '\n'), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing %s: %v\n", settingsFile, err)
 		os.Exit(1)
 	}
