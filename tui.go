@@ -290,11 +290,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Scan tmux panes to refresh terminal state
 		panes := m.tmux.ListPanes()
+		livePanes := make(map[string]bool, len(panes))
 		m.terminals = make(map[string]Terminal)
 		for _, p := range panes {
+			livePanes[p.PaneID] = true
 			p.Keys = loadPaneKeys(p.PaneID)
 			m.terminals[p.PaneID] = p
 		}
+		cleanupStaleKeys(livePanes)
 		m.updateTerminalList()
 		return m, tea.Batch(tickCmd(), m.fetchTicketsCmd(), m.refreshTicketInfoCmd())
 
@@ -657,15 +660,15 @@ func (m model) handleCopyTicket() (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var s strings.Builder
 
-	hasCladeSessions := false
+	hasActiveProcessing := false
 	for _, term := range m.terminals {
-		if term.Keys["claude"] {
-			hasCladeSessions = true
+		if term.Keys["claude-processing"] {
+			hasActiveProcessing = true
 			break
 		}
 	}
 	artColor := lipgloss.Color("99")
-	if !hasCladeSessions {
+	if !hasActiveProcessing {
 		artColor = lipgloss.Color("196")
 	}
 	artStyle := lipgloss.NewStyle().Foreground(artColor).Padding(0, 2, 0, 0)
@@ -714,23 +717,17 @@ func (m model) View() string {
 		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 		normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 		selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
-		windowHeaderStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Bold(true)
 
 		lastWindowID := ""
 		for i, paneID := range m.terminalPaneIDs {
 			term := m.terminals[paneID]
 
-			// Window group header
+			// Thin separator between window groups
 			if term.WindowID != lastWindowID {
 				if lastWindowID != "" {
+					rightSide.WriteString(dimStyle.Render("  ────────────────────────────"))
 					rightSide.WriteString("\n")
 				}
-				windowLabel := term.WindowName
-				if windowLabel == "" {
-					windowLabel = term.WindowID
-				}
-				rightSide.WriteString(windowHeaderStyle.Render(fmt.Sprintf("  %s", windowLabel)))
-				rightSide.WriteString("\n")
 				lastWindowID = term.WindowID
 			}
 			isSelected := i == m.terminalCursor && m.cursor >= len(m.tickets)
@@ -868,6 +865,35 @@ func (m model) View() string {
 	s.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, artRendered, rightSide.String()))
 
 	return s.String()
+}
+
+// cleanupStaleKeys removes key files for dead panes and legacy files without session IDs.
+func cleanupStaleKeys(livePanes map[string]bool) {
+	entries, err := os.ReadDir(keysDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		// Parse: {paneID}.{keyName}.{sessionID} or legacy {paneID}.{keyName}
+		firstDot := strings.Index(name, ".")
+		if firstDot <= 0 {
+			continue
+		}
+		paneID := name[:firstDot]
+		rest := name[firstDot+1:]
+
+		// Remove if pane no longer exists in tmux
+		if !livePanes[paneID] {
+			os.Remove(filepath.Join(keysDir, name))
+			continue
+		}
+
+		// Remove legacy files (no session ID component)
+		if !strings.Contains(rest, ".") {
+			os.Remove(filepath.Join(keysDir, name))
+		}
+	}
 }
 
 // loadPaneKeys reads key marker files for a given pane ID from /tmp/soap/keys/
