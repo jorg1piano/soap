@@ -29,6 +29,16 @@ func printUsage() {
 	fmt.Println("  install-tmux-hooks     Install tmux hooks to ~/.tmux.conf")
 }
 
+// logCommand logs a CLI command invocation to /tmp/soap.log
+func logCommand(cmd string, args []string) {
+	f, err := os.OpenFile("/tmp/soap.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "[%s] cmd=%s args=%v pid=%d\n", time.Now().Format(time.RFC3339), cmd, args, os.Getpid())
+}
+
 // runCLI handles all CLI commands
 func runCLI(args []string, cfg *Config, store *Store, tmux *TmuxManager) {
 	if len(args) == 0 {
@@ -37,6 +47,7 @@ func runCLI(args []string, cfg *Config, store *Store, tmux *TmuxManager) {
 	}
 
 	cmd := args[0]
+	logCommand(cmd, args[1:])
 
 	switch cmd {
 	case "list":
