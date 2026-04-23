@@ -68,6 +68,26 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.soap/soap add-key claude-processing"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.soap/soap add-key claude-processing"
+          }
+        ]
+      }
     ]
   }
 }
