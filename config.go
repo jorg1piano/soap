@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"text/template"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -19,6 +20,25 @@ type Config struct {
 	OpenTicket    string `yaml:"openTicket"`    // URL template for opening tickets in browser
 	CopyTicket  string `yaml:"copyTicket"`  // Command for copying ticket links
 	LoadTicket  string `yaml:"loadTicket"`  // Command to load ticket details by ID
+
+	// PollInterval is how often to call listTickets and loadTicket (e.g. "30s", "2m").
+	// Empty or invalid values fall back to DefaultPollInterval.
+	PollInterval string `yaml:"pollInterval"`
+}
+
+// DefaultPollInterval is used when PollInterval is unset or unparseable.
+const DefaultPollInterval = 30 * time.Second
+
+// PollDuration parses PollInterval, falling back to DefaultPollInterval.
+func (c *Config) PollDuration() time.Duration {
+	if c.PollInterval == "" {
+		return DefaultPollInterval
+	}
+	d, err := time.ParseDuration(c.PollInterval)
+	if err != nil || d <= 0 {
+		return DefaultPollInterval
+	}
+	return d
 }
 
 // ExternalTicket represents a ticket from an external system

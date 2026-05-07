@@ -87,6 +87,7 @@ type model struct {
 }
 
 type tickMsg struct{}
+type pollTickMsg struct{}
 type animTickMsg struct{}
 type statusMsg struct{ msg string }
 type listTicketsMsg struct {
@@ -108,6 +109,12 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 func tickCmd() tea.Cmd {
 	return tea.Tick(2*time.Second, func(time.Time) tea.Msg {
 		return tickMsg{}
+	})
+}
+
+func pollTickCmd(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(time.Time) tea.Msg {
+		return pollTickMsg{}
 	})
 }
 
@@ -243,7 +250,7 @@ func (m *model) selectedTicket() *ExternalTicket {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), animTickCmd(), m.fetchTicketsCmd())
+	return tea.Batch(tickCmd(), pollTickCmd(m.cfg.PollDuration()), animTickCmd(), m.fetchTicketsCmd())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -288,7 +295,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		// Scan tmux panes to refresh terminal state
+		// Scan tmux panes to refresh terminal state (cheap, local)
 		panes := m.tmux.ListPanes()
 		livePanes := make(map[string]bool, len(panes))
 		m.terminals = make(map[string]Terminal)
@@ -299,7 +306,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cleanupStaleKeys(livePanes)
 		m.updateTerminalList()
-		return m, tea.Batch(tickCmd(), m.fetchTicketsCmd(), m.refreshTicketInfoCmd())
+		return m, tickCmd()
+
+	case pollTickMsg:
+		// External API calls — gated behind the configurable poll interval
+		return m, tea.Batch(pollTickCmd(m.cfg.PollDuration()), m.fetchTicketsCmd(), m.refreshTicketInfoCmd())
 
 	case tea.KeyMsg:
 		// Handle label editing mode

@@ -28,3 +28,8 @@ loadTicket: |
   echo '{"id": "{{.ID}}", "status": "active", "title": "Some ticket", "description": "Detailed description here. This can be pretty long. And be multiline. Be prepared to render some really long lines."}'
 
 freeclaudeDir: /tmp/freeclaude
+
+# How often to poll listTickets and loadTicket. Accepts any Go duration
+# (e.g. "10s", "30s", "2m", "5m"). Defaults to 30s if unset.
+# Increase this if you're hitting rate limits on GitHub/Azure/etc.
+# pollInterval: 30s

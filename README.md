@@ -87,6 +87,7 @@ freeclaudeDir: /tmp/freeclaude
 | `copyTicket` | No | Shell command to copy ticket link (`y`). E.g. pipe to `pbcopy` |
 | `loadTicket` | No | Shell command to load ticket details. Output JSON with `id`, `title`, `description`, `status` fields — shown in terminal info |
 | `freeclaudeDir` | No | Directory to open free (non-ticket) Claude sessions in (`f`) |
+| `pollInterval` | No | How often to poll `listTickets` and `loadTicket` (e.g. `30s`, `2m`). Defaults to `30s`. Increase to avoid hammering external APIs |
 
 ### Template Variables
 
